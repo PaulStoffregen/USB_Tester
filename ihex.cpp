@@ -82,7 +82,20 @@ static bool parse_hex(const char *line, uint32_t *addr, uint8_t *data,
 	if (!hex2(line + 1, len)) return false;
 	if (!hex4(line + 3, addr)) return false;
 	if (!hex2(line + 7, &code)) return false;
+	// compute & verify checksum
 	sum = *len + (*addr >> 8) + (*addr & 255) + code;
+	for (uint32_t i=0; i < *len; i++) {
+		uint32_t byte;
+		if (!hex2(line + ((i * 2) + 9), &byte)) return false;
+		sum += byte;
+	}
+	if (!hex2(line + ((*len * 2) + 9), &cksum)) return false;
+	//Serial.printf(" sum=%X, cksum=%X, sum+cksum=%X\n", sum, cksum, sum+cksum);
+	if (((sum + cksum) & 255) != 0) {
+		Serial.println("HEX file checksum error");
+		return false;
+	}
+
 	if (code == 1) {
 		// end of data line
 		*len = 0;
@@ -94,9 +107,6 @@ static bool parse_hex(const char *line, uint32_t *addr, uint8_t *data,
 	if (code == 2 && *len == 2) {
 		// extended address, 20 bits
 		if (!hex4(line + 9, &extaddr)) return false;
-		if (!hex2(line + 11, &cksum)) return false;
-		sum += (extaddr >> 8) + (extaddr & 255);
-		if (((sum + cksum) & 255) != 0) return false;
 		extended_addr = extaddr << 4;
 		*len = 0;
 		*addr = 0;
@@ -104,15 +114,22 @@ static bool parse_hex(const char *line, uint32_t *addr, uint8_t *data,
 		return true;
 	}
 	if (code == 4 && *len == 2) {
-		// extended address, 20 bits
+		// extended address, 32 bits
 		if (!hex4(line + 9, &extaddr)) return false;
-		if (!hex2(line + 11, &cksum)) return false;
-		sum += (extaddr >> 8) + (extaddr & 255);
-		if (((sum + cksum) & 255) != 0) return false;
 		extended_addr = extaddr << 16;
+		if (extended_addr == 0x60000000) {
+			// kludge for Teensy 4.0, consider 0x60000000 to be address zero
+			extended_addr = 0;
+		}
 		*len = 0;
 		*addr = 0;
-		//Serial.printf("ext addr = %08x\n", extended_addr);
+		Serial.printf("ext addr = %08x\n", extended_addr);
+		return true;
+	}
+	if (code == 5 && *len > 0) {
+		*len = 0;
+		*addr = 0;
+		//Serial.println("entry point (ignored)");
 		return true;
 	}
 	if (code == 0) {
@@ -124,10 +141,7 @@ static bool parse_hex(const char *line, uint32_t *addr, uint8_t *data,
 			if (!hex2(line, &byte)) return false;
 			line += 2;
 			*data++ = byte;
-			sum += byte;
 		}
-		if (!hex2(line, &cksum)) return false;
-		if (((sum + cksum) & 255) != 0) return false;
 		//Serial.printf("data at %04X, len=%d\n", *addr, *len);
 		return true;
 	}
@@ -148,6 +162,7 @@ bool ihex_open(const char *filename)
 
 bool ihex_read(uint32_t addr, uint8_t *data, uint32_t len, uint32_t *count)
 {
+	uint32_t linenum = 0;
 	//Serial.printf("ihex_read:\n");
 	if (end_of_data) return false;
 	if (len == 0) return true;
@@ -159,8 +174,10 @@ bool ihex_read(uint32_t addr, uint8_t *data, uint32_t len, uint32_t *count)
 			//Serial.printf("linebuf: %s\n", linebuf);
 			uint32_t hexaddr, hexlen;
 			uint8_t hexdata[64];
-			if (!parse_hex(linebuf, &hexaddr, hexdata, sizeof(hexdata), &hexlen))
+			if (!parse_hex(linebuf, &hexaddr, hexdata, sizeof(hexdata), &hexlen)) {
+				Serial.printf("HEX parse error, line %u\n", linenum);
 				return false;
+			}
 			if (end_of_data) return true;
 			if ((hexaddr < addr + len) && (hexaddr + hexlen > addr)) {
 				// this line contains at least some data we need
@@ -193,7 +210,11 @@ bool ihex_read(uint32_t addr, uint8_t *data, uint32_t len, uint32_t *count)
 			}
 			linebuf[0] = 0;
 		}
-		if (!getline(hexfile, linebuf, sizeof(linebuf))) return false;
+		if (getline(hexfile, linebuf, sizeof(linebuf))) {
+			linenum++;
+		} else {
+			return false;
+		}
 	}
 
 	//while (getline(hexfile, linebuf, sizeof(linebuf))) {

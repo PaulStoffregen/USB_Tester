@@ -3,17 +3,13 @@
 // 25 = Pass LED
 // 2 = Power enable, high=on
 // 3 = Overcurrent detect, low=overcurrent, open collector
-// 8,9 = Amplifier gain
-//   8=low  9=low  25X   200mA
-//   8=low  9=high 50X   100mA
-//   8=high 9=low  100X   50mA
-//   8=high 9=high 200X   25mA
 // A10 = Amplifier signal
 // A11 = Amplifier reference
 
 // build with Teensyduino 1.41-beta or later
 
 #include <SD.h>
+#include <Wire.h>
 #include <USBHost_t36.h>
 #include "bootloader.h"
 #include "ihex.h"
@@ -27,14 +23,19 @@ TeensyRawhid rawhid(usb);
 #error "Please compile with Tools > CPU set to 120 MHz"
 #endif
 
-const uint8_t unused_pins[] = {0, 1, 4, 5, 6, 7, 10, 11, 12, 13,
+const uint8_t unused_pins[] = {0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
 	14, 15, 16, 17, 18, 19, 20, /*21,*/ 22, 26, 27, 28, 29, 30, 31, 32,
 	33, 34, 35, 36, 37, 38, 39};
 
 uint8_t usbdata[1088];
 uint8_t hexdata[1024];
 uint8_t serdata[64];
-uint8_t priorserdata[64];
+uint32_t priorsercount=0;
+uint8_t priorserdata[72*999];
+
+
+bool virgin_teensy2=false;
+elapsedMillis testElapsedTime;
 
 void setup()
 {
@@ -59,8 +60,10 @@ void setup()
 	digitalWrite(8, LOW);
 	digitalWrite(9, LOW);
 	delay(100);
-	bool r = SD.begin(BUILTIN_SDCARD);
+	//bool r = SD.begin(BUILTIN_SDCARD);
+	bool r = SD.begin(10);
 	while (!Serial && millis() < 1500) ; // wait
+	ht16k33_config();
 	Serial.println("USB Tester, files present:");
 	if (!r) sd_error();
 	File rootdir = SD.open("/");
@@ -85,7 +88,7 @@ float read_current(void)
 	// returns current in mA
 	// anything below 2mA should be considered zero
 
-	float range = 200;
+	float range = 200.0;
 	int a10=0, a11=0;
 	//int a7=0;
 	for (int i=0; i<10; i++) {
@@ -108,9 +111,32 @@ bool wait_for_bootloader()
 	int undercurrent=0;
 
 	while (undercurrent < 15) {
-		if (bootloader) return true;
-		if (read_current() < 0.3) {
+		if (bootloader) {
+			return true;
+		}
+		float mA = read_current();
+		if (mA < 0.2) {
 			undercurrent++;
+			Serial.printf("  undercurrent #%d, mA = %.2f\n", undercurrent, mA);
+		} else {
+			undercurrent = 0;
+		}
+	}
+	return false;
+}
+
+bool wait_for_not_bootloader()
+{
+	int undercurrent=0;
+
+	while (undercurrent < 15) {
+		if (!bootloader) {
+			return true;
+		}
+		float mA = read_current();
+		if (mA < 0.2) {
+			undercurrent++;
+			Serial.printf("  undercurrent #%d, mA = %.2f\n", undercurrent, mA);
 		} else {
 			undercurrent = 0;
 		}
@@ -134,7 +160,10 @@ bool identify_teensy_model(const char * &filename)
 			case 0x20: filename = "TEENSYLC.HEX"; return true;
 			case 0x21: filename = "TEENSY32.HEX"; return true;
 			case 0x22: filename = "TEENSY36.HEX"; return true;
-			default: return false; // unknown
+			case 0x24: filename = "TEENSY40.HEX"; return true;
+			default:
+				Serial.printf("Unknown model ID = 0x%02X\n", id);
+				return false; // unknown
 		}
 	}
 	return false;
@@ -173,11 +202,12 @@ bool program_teensy(const char *filename)
 	uint32_t address=0;
 	// pre-read the first block
 	bool ok = ihex_read(address, hexdata, blocksize);
+	if (!ok) Serial.printf("Error reading data from %s\n", filename);
 	bool last = false;
 	bool complete = false;
 	bool first_write = true;
 	while (ok && !complete) {
-		//Serial.printf("hex address %x\n", address);
+		Serial.printf("hex address %x\n", address);
 		//for (uint32_t i=0; i < 1024; i++) {
 			//Serial.printf(" %02X", mydata[i+64]);
 			//if ((i & 15) == 15) Serial.println();
@@ -382,23 +412,47 @@ char hex(uint32_t n) {
 // copy the filename and id bytes to "hexdata" in ascii format
 void format_id_bytes(const char *filename)
 {
-	if (memcmp(serdata, priorserdata, 64) != 0) {
-		memcpy(priorserdata, serdata, 64);
-		strcpy((char *)hexdata, filename);
-		int len = strlen(filename);
-		int datalen = serdata[0];
-		for (int i=0; i < datalen; i++) {
-			hexdata[len++] = ',';
-			hexdata[len++] = hex(serdata[i+1] >> 4);
-			hexdata[len++] = hex(serdata[i+1]);
-		}
-		hexdata[len++] = 0;
-		Serial.print("log: ");
-		Serial.println((char *)hexdata);
-	} else {
+	memset(hexdata, 0, sizeof(hexdata));
+
+	if (search_priorser(filename)) {
 		hexdata[0] = 0;
 		Serial.println("previously tested, no need to log");
+		return;
 	}
+	strcpy((char *)hexdata, filename);
+	int len = strlen(filename);
+	int datalen = serdata[0];
+	for (int i=0; i < datalen; i++) {
+		hexdata[len++] = ',';
+		hexdata[len++] = hex(serdata[i+1] >> 4);
+		hexdata[len++] = hex(serdata[i+1]);
+	}
+	hexdata[len++] = 13;
+	hexdata[len++] = 10;
+	hexdata[len++] = 0;
+	Serial.print("log: ");
+	Serial.print((char *)hexdata);
+	if (priorsercount < 999) {
+		uint8_t *p = priorserdata + (priorsercount * 72);
+		memcpy(p, filename, 8);
+		memcpy(p + 8, serdata, 64);
+		priorsercount++;
+		sevenseg(priorsercount);
+	}
+}
+
+//uint8_t serdata[64];
+//uint32_t priorsercount=0;
+//uint8_t priorserdata[72*999];
+
+bool search_priorser(const char *filename)
+{
+	if (!filename) return false;
+	for (uint32_t i=0; i < priorsercount; i++) {
+		const uint8_t *p = priorserdata + (i * 72);
+		if (memcmp(p, filename, 8) == 0 && memcmp(p + 8, serdata, 64) == 0) return true;
+	}
+	return false;
 }
 
 void store_id_bytes(const char *filename)
@@ -406,23 +460,37 @@ void store_id_bytes(const char *filename)
 	if (!hexdata[0]) return;
 	File logfile = SD.open("log.txt", FILE_WRITE);
 	if (!logfile) sd_error();
-	logfile.write((char *)hexdata);
+	logfile.write(hexdata, strlen((char *)hexdata));
 	logfile.close();
 }
 
-bool runtest()
+// 1 = pass, 0 = fail, -1 = aborted, no usb ever seen
+int runtest()
 {
 	const char *filename;
 
-	if (!wait_for_bootloader()) return false;
-	if (!identify_teensy_model(filename)) return false;
-	if (!program_teensy(filename)) return false;
-	if (!reboot_teensy(filename)) return false;
-	if (!wait_for_rawhid()) return false;
-	if (!test_led()) return false;
-	if (!read_id_bytes()) return false;
+	virgin_teensy2 = false;
+	testElapsedTime = 0;
+	if (!wait_for_bootloader()) return -1;
+	if (!identify_teensy_model(filename)) return 0;
+	if (testElapsedTime < 350 &&
+	  (strcmp(filename, "TEENSY20.HEX") == 0 || strcmp(filename, "TEENSYPP.HEX") == 0)) {
+		// virgin Teensy 2.0 & Teensy++ 2.0 come up quickly
+		// in bootloader mode, without button press.
+		Serial.printf("Virgin Teensy2, %u ms\n", (uint32_t)testElapsedTime);
+		if (!wait_for_not_bootloader()) return 0;
+		Serial.println("  Button pressed");
+		if (!wait_for_bootloader()) return 0;
+		Serial.println("  Button released");
+		if (!identify_teensy_model(filename)) return 0;
+	}
+	if (!program_teensy(filename)) return 0;
+	if (!reboot_teensy(filename)) return 0;
+	if (!wait_for_rawhid()) return 0;
+	if (!test_led()) return 0;
+	if (!read_id_bytes()) return 0;
 	format_id_bytes(filename);
-	return true;
+	return 1;
 }
 
 void loop()
@@ -442,13 +510,18 @@ void loop()
 		digitalWrite(24, LOW);
 		digitalWrite(25, LOW);
 		// run the tests
-		bool r = runtest();
-		if (r) {
+		int r = runtest();
+
+		if (r == 1) {
 			digitalWrite(25, HIGH); // Green LED
 			Serial.println("Pass");
-		} else {
+		} else if (r == 0) {
 			digitalWrite(24, HIGH); // Red LED
 			Serial.println("Fail");
+		} else {
+			// TODO: remove this and turn on red LED
+			// when Teensy 2.0 is discontinued
+			Serial.println("Aborted - no USB ever seen");
 		}
 #if 1
 		// write serial number to log file
@@ -475,13 +548,73 @@ void sd_error(void)
 {
 	digitalWrite(25, LOW);
 	while (1) {
-		Serial.println("can't access SD card");
+		//Serial.println("can't access SD card");
 		digitalWrite(24, HIGH);
 		delay(100);
 		digitalWrite(24, LOW);
 		delay(150);
 	}
 }
+
+void sevenseg(int num)
+{
+	Serial.printf("sevenseg %d\n", num);
+	static const uint8_t segments[10] = {
+		//.AFBGCDE
+		0b01110111, // 0
+		0b00010100, // 1
+		0b01011011, // 2
+		0b01011110, // 3
+		0b00111100, // 4
+		0b01101110, // 5
+		0b01101111, // 6
+		0b01010100, // 7
+		0b01111111, // 8
+		0b01111110, // 9
+	};
+	uint8_t leddata[16];
+	memset(leddata, 0, sizeof(leddata));
+	if (num > 999) num = 999;
+	if (num < 0) num = 0;
+	int hundreds = num / 100;
+	int tens = (num % 100) / 10;
+	int ones = (num % 100) % 10;
+	if (num >= 100) {
+		leddata[2] = segments[hundreds];
+		leddata[0] = segments[hundreds];
+	}
+	if (num >= 10) {
+		leddata[6] = segments[tens];
+		leddata[4] = segments[tens];
+	}
+	leddata[10] = segments[ones];
+	leddata[8] = segments[ones];
+	Wire.beginTransmission(0x70);
+	Wire.write(0);
+	Wire.write(leddata, 16);
+	Wire.endTransmission();
+}
+
+void ht16k33_config()
+{
+	Wire.begin();
+	Wire.beginTransmission(0x70);
+	for (int i=0; i < 17; i++) {
+		Wire.write(0); // zero display memory
+	}
+	Wire.endTransmission();
+	Wire.beginTransmission(0x70);
+	Wire.write(0x21); // turn clock on
+	Wire.endTransmission();
+	Wire.beginTransmission(0x70);
+	Wire.write(0x81); // display on, no blinking
+	Wire.endTransmission();
+	Wire.beginTransmission(0x70);
+	Wire.write(0xEF); // dimming, 16/16 duty
+	Wire.endTransmission();
+	sevenseg(0);
+}
+
 
 
 
