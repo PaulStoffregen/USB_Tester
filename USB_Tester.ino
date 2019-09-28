@@ -87,6 +87,7 @@ float read_current(void)
 {
 	// returns current in mA
 	// anything below 2mA should be considered zero
+	//  new hardware has more accurate 1N190A1 current sense amp, lower values should be better
 
 	float range = 200.0;
 	int a10=0, a11=0;

@@ -2,7 +2,7 @@
 
 This is the test board PJRC uses for testing the USB port on new Teensy boards.
 
-![](extra/hardware.jpg)
+![](extra/new_hardware.jpg)
 
 At this point this whole thing is pretty much undocumented.  Someday I intend to
 write a blog article about the lengthy process and analog challenges that came
