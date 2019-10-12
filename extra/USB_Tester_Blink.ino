@@ -9,6 +9,24 @@
 #endif
 #endif
 
+#if defined(__MK20DX128__) || defined(__MK20DX256__) || defined(__MKL26Z64__)
+  #define NUM_SOLDERED_DIGITAL_PINS 24
+  #define NUM_SOLDERED_TOTAL_PINS   24
+#elif defined(__MK64FX512__) || defined(__MK66FX1M0__)
+  #define NUM_SOLDERED_DIGITAL_PINS 40
+  #define NUM_SOLDERED_TOTAL_PINS   42
+#elif defined(__IMXRT1062__)
+  #define NUM_SOLDERED_DIGITAL_PINS 24
+  #define NUM_SOLDERED_TOTAL_PINS   24
+#else
+  #error "Need to define NUM_SOLDERED_DIGITAL_PINS for this board"
+#endif
+
+#include <util/crc16.h>
+
+bool blinking = true;
+elapsedMillis inactive;
+
 void setup() {
 	pinMode(LED_BUILTIN, OUTPUT);
 	#if defined(__arm__)
@@ -21,7 +39,9 @@ void mydelay(unsigned int msec) {
 	uint8_t buf[64];
 	elapsedMillis ms = 0;
 	while (ms < msec) {
+		// For USB port testing...
 		if (RawHID.recv(buf, 0) > 0) {
+			pinMode(LED_BUILTIN, OUTPUT);
 			digitalWrite(LED_BUILTIN, ((buf[0] & 1) ? HIGH : LOW));
 			//Serial2.printf("revc %d\r\n", buf[0]);
 			ms = 0;
@@ -63,33 +83,48 @@ void mydelay(unsigned int msec) {
 				#endif
 				RawHID.send(buf, 250);
 			}
+			blinking = false;
+			inactive = 0;
 		}
 		#if defined(__arm__)
 		// For testing soldered pins...
 		if (Serial1.read() == 0xC9) {
+			for (int pin=2; pin < NUM_SOLDERED_DIGITAL_PINS; pin++) {
+				pinMode(pin, INPUT);
+			}
 			buf[0] = 0x36;
 			memword(buf+1, read_serial_number());
-			buf[5] = read_pins(2);
-			buf[6] = read_pins(10);
-			buf[7] = read_pins(18);
-			buf[8] = read_pins(26);
-			buf[9] = read_pins(34);
-			buf[10] = 0;
+			buf[5] = NUM_SOLDERED_TOTAL_PINS;
+			buf[6] = read_pins(2);
+			buf[7] = read_pins(10);
+			buf[8] = read_pins(18);
+			buf[9] = read_pins(26);
+			buf[10] = read_pins(34);
 			buf[11] = 0;
 			buf[12] = 0;
 			buf[13] = 0;
-			buf[14] = 0;
-			buf[15] = 0;
+			uint16_t crc = 0x5A96;
+			for (int i=0; i < 14; i++) {
+				crc = _crc16_update(crc, buf[i]);
+			}
+			buf[14] = crc & 255;
+			buf[15] = (crc >> 8) & 255;
 			Serial1.write(buf, 16);
+			blinking = false;
+			inactive = 0;
 		}
 		#endif
+		if (!blinking && inactive > 1000) {
+			pinMode(LED_BUILTIN, OUTPUT);
+			blinking = true;
+		}
 	}
 }
 
 void loop() {
-	digitalWrite(LED_BUILTIN, HIGH);
+	if (blinking) digitalWrite(LED_BUILTIN, HIGH);
 	mydelay(1000);
-	digitalWrite(LED_BUILTIN, LOW);
+	if (blinking) digitalWrite(LED_BUILTIN, LOW);
 	mydelay(1000);
 }
 
@@ -124,7 +159,7 @@ uint8_t read_pins(int first_pin)
 	int b = 0;
 	for (int i=0; i < 8; i++) {
 		int pin = first_pin + i;
-		if (pin < NUM_DIGITAL_PINS) {
+		if (pin < NUM_SOLDERED_DIGITAL_PINS) {
 			if (digitalRead(pin)) b |= (1 << i);
 		}
 		#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
