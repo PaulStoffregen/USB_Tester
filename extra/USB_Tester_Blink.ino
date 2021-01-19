@@ -15,9 +15,12 @@
 #elif defined(__MK64FX512__) || defined(__MK66FX1M0__)
   #define NUM_SOLDERED_DIGITAL_PINS 40
   #define NUM_SOLDERED_TOTAL_PINS   42
-#elif defined(__IMXRT1062__)
+#elif defined(__IMXRT1062__) && defined(ARDUINO_TEENSY40)
   #define NUM_SOLDERED_DIGITAL_PINS 24
   #define NUM_SOLDERED_TOTAL_PINS   24
+#elif defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
+  #define NUM_SOLDERED_DIGITAL_PINS 42
+  #define NUM_SOLDERED_TOTAL_PINS   42
 #else
   #error "Need to define NUM_SOLDERED_DIGITAL_PINS for this board"
 #endif
